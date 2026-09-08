@@ -20,6 +20,7 @@
 #include <linux/hardirq.h>
 #include <linux/kvm_types.h>
 #include <linux/pkeys.h>
+#include <linux/simd_regs.h>
 #include <linux/vmalloc.h>
 
 #include "context.h"
@@ -512,6 +513,62 @@ void fpu_flush_to_fpstate(void)
 	__fpu_flush_to_fpstate();
 	if (!irqs_off)
 		fpregs_unlock();
+}
+
+int arch_read_user_simd_reg(u32 regno, void *dst, u32 len)
+{
+	struct fpstate *fps;
+	void *xmm;
+
+	if (!cpu_feature_enabled(X86_FEATURE_XMM))
+		return -EOPNOTSUPP;
+	/*
+	 * XMM8-XMM15 only exist in 64-bit mode; outside it FXSAVE/XSAVE leave
+	 * those slots untouched, so accepting regno >= 8 there would return
+	 * whatever the save area happened to hold.
+	 */
+	if (regno >= (IS_ENABLED(CONFIG_X86_64) ? 16 : 8) ||
+	    (len != 8 && len != 16))
+		return -EINVAL;
+
+	/*
+	 * Read the fpstate pointer before the flush. The flush only writes
+	 * through fpu->fpstate, it never repoints it, and only current itself
+	 * can repoint it (via fpu_swap_kvm_fpstate() on the KVM_RUN path), so
+	 * one read up front is enough.
+	 */
+	fps = x86_task_fpu(current)->fpstate;
+
+	/*
+	 * current is a vCPU thread inside KVM_RUN: kvm_load_guest_fpu() has
+	 * swapped fpu->fpstate to the guest's for the duration of the ioctl
+	 * and cleared TIF_NEED_FPU_LOAD, so flushing would XSAVE the live
+	 * registers into the guest's fpstate and the read would return guest
+	 * register contents. Refuse rather than leak across that boundary.
+	 */
+	if (fps->is_guest)
+		return -EOPNOTSUPP;
+
+	fpu_flush_to_fpstate();
+
+	if (use_xsave()) {
+		/*
+		 * get_xsave_addr() handles the compacted XSAVES layout, and
+		 * returns NULL when the component is in its init state - which
+		 * means "all zeros", not "unavailable". Returning stale buffer
+		 * contents here would be a bug.
+		 */
+		xmm = get_xsave_addr(&fps->regs.xsave, XFEATURE_SSE);
+		if (!xmm) {
+			memset(dst, 0, len);
+			return len;
+		}
+	} else {
+		xmm = &fps->regs.fxsave.xmm_space[0];
+	}
+
+	memcpy(dst, xmm + regno * 16, len);
+	return len;
 }
 
 void kernel_fpu_begin_mask(unsigned int kfpu_mask)
