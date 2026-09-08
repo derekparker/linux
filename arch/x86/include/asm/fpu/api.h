@@ -111,6 +111,7 @@ extern int cpu_has_xfeatures(u64 xfeatures_mask, const char **feature_name);
 /* Trap handling */
 extern int  fpu__exception_code(struct fpu *fpu, int trap_nr);
 extern void fpu_sync_fpstate(struct fpu *fpu);
+extern void fpu_flush_to_fpstate(void);
 extern void fpu_reset_from_exception_fixup(void);
 
 /* Boot, hotplug and resume */

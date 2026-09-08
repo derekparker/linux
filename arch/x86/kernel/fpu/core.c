@@ -469,6 +469,51 @@ int fpu_copy_uabi_to_guest_fpstate(struct fpu_guest *gfpu, const void *buf,
 EXPORT_SYMBOL_FOR_KVM(fpu_copy_uabi_to_guest_fpstate);
 #endif /* CONFIG_KVM */
 
+/*
+ * Save current's user FPU register state into its fpstate and mark the
+ * in-memory copy as authoritative, so that subsequent readers do not
+ * re-save it. The hardware register contents are left untouched and are
+ * reloaded before the next return to userspace.
+ *
+ * The caller must guarantee that neither preemption nor a softirq can run
+ * between the TIF_NEED_FPU_LOAD test and the save. Holding fpregs_lock() is
+ * the usual way to do that, but having interrupts disabled already achieves
+ * it - which is why kernel_fpu_begin_mask() skips the lock in that case.
+ *
+ * __always_inline so that kernel_fpu_begin_mask() keeps identical codegen to
+ * the open-coded version this was factored out of; it is on crypto and RAID
+ * hot paths and must not gain a call.
+ */
+static __always_inline void __fpu_flush_to_fpstate(void)
+{
+	if (!(current->flags & (PF_KTHREAD | PF_USER_WORKER)) &&
+	    !test_thread_flag(TIF_NEED_FPU_LOAD)) {
+		set_thread_flag(TIF_NEED_FPU_LOAD);
+		save_fpregs_to_fpstate(x86_task_fpu(current));
+	}
+}
+
+/*
+ * Locked wrapper around __fpu_flush_to_fpstate() for callers that only
+ * want current's user FPU state made available in memory.
+ *
+ * Same contract as kernel_fpu_begin_mask(): fpregs_lock() is local_bh_disable()
+ * on !RT, which is invalid with interrupts already disabled. When they are,
+ * preemption and softirqs are excluded anyway, so the lock is not needed.
+ * Sample irqs_disabled() once so that the lock and unlock decisions cannot
+ * disagree.
+ */
+void fpu_flush_to_fpstate(void)
+{
+	bool irqs_off = irqs_disabled();
+
+	if (!irqs_off)
+		fpregs_lock();
+	__fpu_flush_to_fpstate();
+	if (!irqs_off)
+		fpregs_unlock();
+}
+
 void kernel_fpu_begin_mask(unsigned int kfpu_mask)
 {
 	if (!irqs_disabled())
@@ -480,11 +525,7 @@ void kernel_fpu_begin_mask(unsigned int kfpu_mask)
 	WARN_ON_FPU(!this_cpu_read(kernel_fpu_allowed));
 	this_cpu_write(kernel_fpu_allowed, false);
 
-	if (!(current->flags & (PF_KTHREAD | PF_USER_WORKER)) &&
-	    !test_thread_flag(TIF_NEED_FPU_LOAD)) {
-		set_thread_flag(TIF_NEED_FPU_LOAD);
-		save_fpregs_to_fpstate(x86_task_fpu(current));
-	}
+	__fpu_flush_to_fpstate();
 	__cpu_invalidate_fpregs_state();
 
 	/* Put sane initial values into the control registers. */
