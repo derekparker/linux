@@ -24,6 +24,7 @@
 #include <linux/key.h>
 #include <linux/namei.h>
 #include <linux/file.h>
+#include <linux/simd_regs.h>
 
 #include <net/bpf_sk_storage.h>
 
@@ -3432,6 +3433,58 @@ __bpf_kfunc __u64 *bpf_session_cookie(void *ctx)
 	return session_ctx->data;
 }
 
+#ifdef CONFIG_HAVE_USER_SIMD_REG_ACCESS
+/**
+ * bpf_get_fp_reg - Read a user-space SIMD register of the current task
+ * @dst: destination buffer
+ * @dst__sz: size of @dst; 8 reads the low half of the register, 16 reads
+ *           all of it
+ * @regno: architecture SIMD register number. 0-15 selects XMM0-XMM15 on
+ *         x86-64; 0-31 selects V0-V31 on arm64.
+ *
+ * Reads the user-space SIMD register state of the current task. In a
+ * uprobe handler these hold the traced function's floating-point
+ * arguments (at entry) or return value (at return), which register-based
+ * calling conventions often never spill to memory.
+ *
+ * Only usable from preemptible task context, which is where the intended
+ * caller - a uprobe handler - always runs. A kprobe program can fire in
+ * hardirq or NMI context or with interrupts disabled, and the underlying
+ * architecture flush takes softirq-disabling locks that are invalid there,
+ * so the call returns -EOPNOTSUPP instead.
+ *
+ * The values are current's *user-space* registers. At a kprobe on a kernel
+ * function they are therefore the interrupted task's user registers, which
+ * are unrelated to that kernel function's own arguments.
+ *
+ * Return: number of bytes written on success, -EINVAL for a bad @regno or
+ * @dst__sz, -EOPNOTSUPP outside preemptible task context, on a kernel or
+ * user-worker thread, or when the CPU lacks support.
+ */
+__bpf_kfunc int bpf_get_fp_reg(void *dst, u32 dst__sz, u32 regno)
+{
+	if (dst__sz != 8 && dst__sz != 16)
+		return -EINVAL;
+	/*
+	 * The intended caller is a uprobe handler, which always runs in
+	 * preemptible task context. A kprobe program can fire anywhere,
+	 * including hardirq and NMI context, and the arch flush below takes
+	 * softirq-disabling locks that are invalid in those contexts.
+	 */
+	if (in_nmi() || in_hardirq() || irqs_disabled())
+		return -EOPNOTSUPP;
+	/*
+	 * Match the guard in __fpu_flush_to_fpstate(): for these tasks the
+	 * flush is a no-op, so the arch code would return whatever the
+	 * fpstate already held rather than the caller's registers.
+	 */
+	if (current->flags & (PF_KTHREAD | PF_USER_WORKER))
+		return -EOPNOTSUPP;
+
+	return arch_read_user_simd_reg(regno, dst, dst__sz);
+}
+#endif /* CONFIG_HAVE_USER_SIMD_REG_ACCESS */
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(session_kfunc_set_ids)
@@ -3456,12 +3509,27 @@ static const struct btf_kfunc_id_set bpf_session_kfunc_set = {
 	.filter = bpf_session_filter,
 };
 
+#ifdef CONFIG_HAVE_USER_SIMD_REG_ACCESS
+BTF_KFUNCS_START(fp_reg_kfunc_set_ids)
+BTF_ID_FLAGS(func, bpf_get_fp_reg)
+BTF_KFUNCS_END(fp_reg_kfunc_set_ids)
+
+static const struct btf_kfunc_id_set bpf_fp_reg_kfunc_set = {
+	.owner = THIS_MODULE,
+	.set = &fp_reg_kfunc_set_ids,
+};
+#endif
+
 static int __init bpf_trace_kfuncs_init(void)
 {
 	int err = 0;
 
 	err = err ?: register_btf_kfunc_id_set(BPF_PROG_TYPE_KPROBE, &bpf_session_kfunc_set);
 	err = err ?: register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING, &bpf_session_kfunc_set);
+#ifdef CONFIG_HAVE_USER_SIMD_REG_ACCESS
+	err = err ?: register_btf_kfunc_id_set(BPF_PROG_TYPE_KPROBE,
+					       &bpf_fp_reg_kfunc_set);
+#endif
 
 	return err;
 }
