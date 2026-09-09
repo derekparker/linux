@@ -28,6 +28,7 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/task_stack.h>
 #include <linux/signal.h>
+#include <linux/simd_regs.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/stddef.h>
@@ -1844,6 +1845,56 @@ void fpsimd_save_and_flush_current_state(void)
 	fpsimd_save_user_state();
 	fpsimd_flush_task_state(current);
 	put_cpu_fpsimd_context();
+}
+
+/*
+ * Read one of current's user-space V-registers.
+ *
+ * Must only be called from preemptible task context, with current's FPSIMD
+ * state either live on this CPU or already saved to memory.
+ *
+ * Note that there is no KVM hazard here, unlike on some other architectures:
+ * while a vCPU thread is inside KVM_RUN the guest state lives in the vCPU's
+ * own buffer, so the save below still targets - and the read below still
+ * returns - the host task's own user state.
+ */
+int arch_read_user_simd_reg(u32 regno, void *dst, u32 len)
+{
+	if (!system_supports_fpsimd())
+		return -EOPNOTSUPP;
+	if (regno >= 32 || (len != 8 && len != 16))
+		return -EINVAL;
+
+	/*
+	 * Kernel-mode NEON is in flight on this task: kernel_neon_begin() was
+	 * called from preemptible task context, and thread.kernel_fpsimd_state
+	 * is the only record of where that state will be saved. Flushing below
+	 * would NULL it, and the next context switch would then hit the
+	 * BUG_ON(!cpu_fp_state.st) in fpsimd_save_kernel_state(). There is no
+	 * user state to report here anyway, so just refuse.
+	 */
+	if (test_thread_flag(TIF_KERNEL_FPSTATE))
+		return -EOPNOTSUPP;
+
+	/*
+	 * Save user state and mark the memory copy authoritative. This is
+	 * idempotent: fpsimd_save_user_state() early-outs once
+	 * TIF_FOREIGN_FPSTATE is set, so repeated reads within one kernel
+	 * entry do not re-save.
+	 */
+	fpsimd_save_and_flush_current_state();
+
+	/*
+	 * For a task in SVE mode the effective state lives in sve_state and
+	 * uw.fpsimd_state is stale, so materialise the V-register view. This
+	 * re-runs sve_to_fpsimd() on every call rather than being memoised
+	 * like the save above - a bounded ~512 byte copy, deliberately not
+	 * cached. Mirrors what ptrace's fpr_get() does.
+	 */
+	fpsimd_sync_from_effective_state(current);
+
+	memcpy(dst, &current->thread.uw.fpsimd_state.vregs[regno], len);
+	return len;
 }
 
 /*
