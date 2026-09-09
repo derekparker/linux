@@ -41,6 +41,7 @@
 #include "verifier_div_mod_bounds.skel.h"
 #include "verifier_div_overflow.skel.h"
 #include "verifier_flow_keys.skel.h"
+#include "verifier_fp_regs.skel.h"
 #include "verifier_global_subprogs.skel.h"
 #include "verifier_global_ptr_args.skel.h"
 #include "verifier_gotol.skel.h"
@@ -204,6 +205,18 @@ void test_verifier_div0(void)                 { RUN(verifier_div0); }
 void test_verifier_div_mod_bounds(void)       { RUN(verifier_div_mod_bounds); }
 void test_verifier_div_overflow(void)         { RUN(verifier_div_overflow); }
 void test_verifier_flow_keys(void)            { RUN(verifier_flow_keys); }
+void test_verifier_fp_regs(void)
+{
+	/* bpf_get_fp_reg() is only registered on architectures that select
+	 * CONFIG_HAVE_USER_SIMD_REG_ACCESS, so elsewhere even the __success
+	 * cases would be rejected at load time.
+	 */
+#if defined(__x86_64__) || defined(__i386__) || defined(__aarch64__)
+	RUN(verifier_fp_regs);
+#else
+	test__skip();
+#endif
+}
 void test_verifier_global_subprogs(void)      { RUN(verifier_global_subprogs); }
 void test_verifier_global_ptr_args(void)      { RUN(verifier_global_ptr_args); }
 void test_verifier_gotol(void)                { RUN(verifier_gotol); }
