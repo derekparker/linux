@@ -845,3 +845,55 @@ the verifier. bpf_cgroup_ancestor() can be used as follows:
 BPF provides a set of kfuncs that can be used to query, allocate, mutate, and
 destroy struct cpumask * objects. Please refer to :ref:`cpumasks-header-label`
 for more details.
+
+4.4 Floating-point register kfuncs
+----------------------------------
+
+Register-based calling conventions pass floating-point arguments in SIMD
+registers -- XMM0-XMM7 under the System V AMD64 ABI, V0-V7 under AAPCS64,
+X0-X14 under Go's register-based ABI -- and optimised code frequently never
+spills them to memory. ``struct pt_regs``, which is the context a uprobe BPF
+program receives, holds only general-purpose registers. So those values are
+simply unreachable from a uprobe today; reading the stack does not help,
+because nothing was ever written there.
+
+``bpf_get_fp_reg()`` reads one such register out of the current task's
+user-space register state:
+
+.. kernel-doc:: kernel/trace/bpf_trace.c
+   :identifiers: bpf_get_fp_reg
+
+The values returned are always the *current task's* user-space registers. In
+a uprobe handler these are the traced function's arguments (at entry) or its
+return value (at a uretprobe).
+
+``bpf_get_fp_reg()`` only works in preemptible task context, which is where a
+uprobe handler always runs. A kprobe program, by contrast, can fire in hardirq
+or NMI context or with interrupts disabled, and the architecture code that
+makes the register state available takes softirq-disabling locks that are
+invalid there; in those contexts the call returns ``-EOPNOTSUPP``. Even where
+it does succeed, at a kprobe on a kernel function the values are the
+interrupted task's *user-space* registers, which have nothing to do with that
+kernel function's own arguments.
+
+``bpf_get_fp_reg()`` is not guaranteed to be present on every kernel a
+program may run on. A program that wants to run on kernels both with and
+without it should declare the kfunc as a weak, possibly-absent symbol and
+guard every call site with bpf_ksym_exists(), since a call to a kfunc that
+the verifier has poisoned still fails verification if it is reachable, even
+when that call is never taken at runtime:
+
+.. code-block:: c
+
+	extern int bpf_get_fp_reg(void *dst, u32 dst__sz, u32 regno) __weak __ksym;
+
+	SEC("uprobe")
+	int BPF_UPROBE(read_xmm0)
+	{
+		u64 xmm0;
+
+		if (bpf_ksym_exists(bpf_get_fp_reg))
+			bpf_get_fp_reg(&xmm0, sizeof(xmm0), 0);
+
+		return 0;
+	}
