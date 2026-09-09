@@ -4973,6 +4973,7 @@ F:	arch/*/net/*
 F:	include/asm-generic/rqspinlock.h
 F:	include/linux/bpf*
 F:	include/linux/btf*
+F:	include/linux/simd_regs.h
 F:	include/linux/buildid.h
 F:	include/linux/filter.h
 F:	include/trace/events/xdp.h

@@ -285,6 +285,15 @@ config HAVE_KPROBES
 config HAVE_KRETPROBES
 	bool
 
+config HAVE_USER_SIMD_REG_ACCESS
+	bool
+	help
+	  An architecture selects this if it implements
+	  arch_read_user_simd_reg(), which reads the current task's
+	  user-space SIMD/floating-point registers. Used by BPF tracing
+	  to observe floating-point function arguments that register-based
+	  calling conventions never spill to memory.
+
 config HAVE_OPTPROBES
 	bool
 
